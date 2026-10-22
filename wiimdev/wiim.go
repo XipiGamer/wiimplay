@@ -6,6 +6,8 @@ import (
     "encoding/xml"
     "fmt"
     "io"
+    "log"
+    "net"
     "net/http"
     "net/url"
     "strconv"
@@ -99,9 +101,10 @@ func (device *WiimDevice) GetInfo() (*DeviceInfo, error) {
     var metadata string
 
     // Auto-generated return ugliness
-    stateString, _, _, track, trackTotal, metadata, _, trackUsed,
-        _, _, _, loopMode, _, volume, mute,
-        _, _, _, _, _, _, _, _, _, _, _, _, _, _, _,
+    stateString, _, _, track, trackTotal, metadata, trackURI, trackUsed,
+        _, _, _, loopMode, playType, volume, mute,
+        _, _, _, _, playMedium, trackSource,
+        _, _, _, _, _, _, _, _, spotifyActive,
         err := device.transport.GetInfoEx(0)
     if err != nil {
         return nil, err
@@ -131,6 +134,13 @@ func (device *WiimDevice) GetInfo() (*DeviceInfo, error) {
         Mute: mute != 0,
         LoopMode: LoopMode(loopMode),
         TrackMetadata: getMetadata(metadata),
+        Source: SourceInfo{
+            PlayMedium: playMedium,
+            TrackSource: trackSource,
+            PlayType: playType,
+            TrackURI: trackURI,
+            SpotifyActive: spotifyActive != 0,
+        },
     }
 
     return info, nil
@@ -177,6 +187,7 @@ func (device *WiimDevice) GetPlayLists() ([]PlayList, string, error) {
     if err != nil {
         return nil, "", err
     }
+    debugDump("browse-TotalQueue", queue)
 
     tpq := &upnp.TotalPlayQueueXml{}
     err = xml.Unmarshal([]byte(queue), &tpq)
@@ -207,6 +218,7 @@ func (device *WiimDevice) GetTracks(id string) ([]Track, int, error) {
     if err != nil {
         return nil, 0, err
     }
+    debugDump("browse-"+id, queue)
 
     pl := &upnp.PlayListXml{}
     err = xml.Unmarshal([]byte(queue), &pl)
@@ -233,6 +245,68 @@ func (device *WiimDevice) GetTracks(id string) ([]Track, int, error) {
 
 func (device *WiimDevice) PlayTrack(track int) error {
     return device.playQueue.PlayQueueWithIndex("CurrentQueue", uint32(track))
+}
+
+// PlayMedia crea una cola con las URLs indicadas y la reproduce desde la
+// primera pista. Devuelve true si se reprodujo como cola completa. Si el WiiM
+// rechaza la cola, reproduce solo la primera pista con SetAVTransportURI
+// (UPnP estándar) y devuelve false.
+func (device *WiimDevice) PlayMedia(name string, items []MediaItem) (bool, error) {
+    if len(items) == 0 {
+        return false, fmt.Errorf("no media items")
+    }
+    queueXml := BuildQueueXML(name, items)
+    log.Printf("PlayMedia: CreateQueue %q (%d tracks, %d bytes)", name, len(items), len(queueXml))
+    debugDump("sent-queue-"+name, queueXml)
+
+    var qerr error
+    if err := device.playQueue.CreateQueue(queueXml); err != nil {
+        // El WiiM puede crear la cola y aun así cerrar la conexión sin
+        // responder (EOF). Se intenta reproducirla igualmente antes de
+        // recurrir a la alternativa de una sola pista.
+        log.Printf("PlayMedia: CreateQueue returned an error (%v); trying to play the queue anyway", err)
+        qerr = fmt.Errorf("CreateQueue: %v", err)
+        time.Sleep(time.Second)
+    } else {
+        log.Printf("PlayMedia: CreateQueue OK")
+    }
+    var perr error
+    for attempt := 1; attempt <= 2; attempt++ {
+        log.Printf("PlayMedia: PlayQueueWithIndex %q 1 (attempt %d)", name, attempt)
+        if perr = device.playQueue.PlayQueueWithIndex(name, 1); perr == nil {
+            break
+        }
+        log.Printf("PlayMedia: PlayQueueWithIndex failed: %v", perr)
+        time.Sleep(time.Second)
+    }
+    if perr == nil {
+        if qerr != nil {
+            log.Printf("PlayMedia: queue is playing despite the CreateQueue error")
+        }
+        return true, nil
+    }
+    if qerr != nil {
+        qerr = fmt.Errorf("%v; PlayQueueWithIndex: %v", qerr, perr)
+    } else {
+        qerr = fmt.Errorf("PlayQueueWithIndex: %v", perr)
+    }
+    log.Printf("PlayMedia: queue playback failed (%v); falling back to a single track", qerr)
+
+    first := items[0]
+    log.Printf("PlayMedia: SetAVTransportURI %s", first.URL)
+    if err := device.transport.SetAVTransportURI(0, first.URL, BuildDIDL("0", first)); err != nil {
+        return false, fmt.Errorf("%v; SetAVTransportURI: %v", qerr, err)
+    }
+    log.Printf("PlayMedia: SetAVTransportURI OK, Play")
+    if err := device.transport.Play(0, "1"); err != nil {
+        return false, fmt.Errorf("%v; Play: %v", qerr, err)
+    }
+    return false, nil
+}
+
+// Reproduce la pista index (empezando en 1) de la cola id.
+func (device *WiimDevice) PlayQueueTrack(id string, index int) error {
+    return device.playQueue.PlayQueueWithIndex(id, uint32(index))
 }
 
 func (device *WiimDevice) SetPlayList(id string) error {
@@ -429,6 +503,19 @@ func (device *WiimDevice) SetAudioInput(input int) error {
     return nil
 }
 
+// Transporte HTTP para las peticiones SOAP. El WiiM cierra la conexión tras
+// cada respuesta; con keep-alive, una petición enviada justo después de otra
+// reutiliza una conexión ya cerrada y falla con EOF. Una conexión por petición
+// evita esa carrera.
+func newSOAPTransport() *http.Transport {
+    return &http.Transport{
+        Proxy: http.ProxyFromEnvironment,
+        DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+        DisableKeepAlives: true,
+        ResponseHeaderTimeout: 30 * time.Second,
+    }
+}
+
 func NewWiimDevice(urlString string) (*WiimDevice, error) {
     device := &WiimDevice{}
 
@@ -454,6 +541,10 @@ func NewWiimDevice(urlString string) (*WiimDevice, error) {
         return nil, err
     }
     device.playQueue = pqClients[0]
+
+    device.transport.SOAPClient.HTTPClient.Transport = newSOAPTransport()
+    device.control.SOAPClient.HTTPClient.Transport = newSOAPTransport()
+    device.playQueue.SOAPClient.HTTPClient.Transport = newSOAPTransport()
 
     hostname := strings.Split(url.Host, ":")[0]
     device.url = "https://" + hostname + "/httpapi.asp?command="

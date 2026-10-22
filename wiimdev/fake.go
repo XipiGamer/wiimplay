@@ -9,6 +9,8 @@ type FakeDevice struct {
 
 func (device *FakeDevice) GetInfo() (*DeviceInfo, error) { return nil, nil }
 func (device *FakeDevice) Play() error { return nil }
+func (device *FakeDevice) PlayQueueTrack(id string, index int) error { return nil }
+func (device *FakeDevice) PlayMedia(name string, items []MediaItem) (bool, error) { return false, nil }
 func (device *FakeDevice) Pause() error { return nil }
 func (device *FakeDevice) Previous() error { return nil }
 func (device *FakeDevice) Next() error { return nil }

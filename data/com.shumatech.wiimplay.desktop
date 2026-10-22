@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=WiiM Play
+Comment=Control WiiM streamers
+Exec=wiimplay
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupNotify=true

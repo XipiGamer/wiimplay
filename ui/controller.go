@@ -1,6 +1,7 @@
 package ui
 
 import (
+    "context"
     "errors"
     "fmt"
     "io"
@@ -11,13 +12,15 @@ import (
     "strings"
     "time"
 
+    "github.com/shumatech/wiimplay/artistinfo"
     "github.com/shumatech/wiimplay/dcache"
+    "github.com/shumatech/wiimplay/localmedia"
     "github.com/shumatech/wiimplay/mpris"
     "github.com/shumatech/wiimplay/wiimdev"
 
-    "github.com/gotk3/gotk3/gdk"
-    "github.com/gotk3/gotk3/glib"
-    "github.com/gotk3/gotk3/gtk"
+    "github.com/diamondburned/gotk4/pkg/gdkpixbuf/v2"
+    "github.com/diamondburned/gotk4/pkg/glib/v2"
+    "github.com/diamondburned/gotk4/pkg/gtk/v4"
     "github.com/hashicorp/golang-lru/v2"
 )
 
@@ -31,7 +34,7 @@ type PixbufRequest struct {
     url string
     width int
     height int
-    complete func(*gdk.Pixbuf)
+    complete func(*gdkpixbuf.Pixbuf)
 }
 
 type Device struct {
@@ -56,8 +59,15 @@ type Controller struct {
 
     runChan chan RunReq
     pixbufChan chan PixbufRequest
-    pixbufCache *lru.Cache[string, *gdk.Pixbuf]
+    pixbufCache *lru.Cache[string, *gdkpixbuf.Pixbuf]
     downloadCache *dcache.DiskCache
+    local *localmedia.Server
+    artistClient *artistinfo.Client
+    artistCache map[string]*artistinfo.Info
+    infoArtist string
+    sourceKey string
+    localItems []localmedia.Item
+    localQueue string
     isHidden bool
     updateTimer glib.SourceHandle
     devices []Device
@@ -169,27 +179,30 @@ func (ctl *Controller) MutePress() {
 }
 
 func (ctl *Controller) SettingsPress() {
-    settings := Settings {
+    settings := &Settings {
         SendNotifications: ctl.config.Get("SendNotifications", true).(bool),
         MprisSupport: ctl.config.Get("MprisSupport", true).(bool),
-        ShowStatusIcon: ctl.config.Get("ShowStatusIcon", true).(bool),
-        HideOnClose: ctl.config.Get("HideOnClose", true).(bool),
+        HideOnClose: ctl.config.Get("HideOnClose", false).(bool),
         HideOnStart: ctl.config.Get("HideOnStart", false).(bool),
+        ShowArtistInfo: ctl.config.Get("ShowArtistInfo", true).(bool),
     }
-    ok, err := ShowSettingsDialog(ctl.application.GetActiveWindow(), &settings)
-    logErr(err)
-    if ok {
+    lastShowArtistInfo := settings.ShowArtistInfo
+    ShowSettingsDialog(ctl.view.GetWindow(), settings, func() {
         ctl.config.Set("SendNotifications", settings.SendNotifications)
         ctl.config.Set("MprisSupport", settings.MprisSupport)
-        ctl.config.Set("ShowStatusIcon", settings.ShowStatusIcon)
         ctl.config.Set("HideOnClose", settings.HideOnClose)
         ctl.config.Set("HideOnStart", settings.HideOnStart)
-        ctl.config.Save()
+        ctl.config.Set("ShowArtistInfo", settings.ShowArtistInfo)
+        logErr(ctl.config.Save())
 
         ctl.view.HideOnDelete(settings.HideOnClose)
-        ctl.view.ShowStatusIcon(settings.ShowStatusIcon)
-        ctl.run( func() { ctl.mprisServer.Listen(settings.MprisSupport) })
-    }
+        if settings.ShowArtistInfo != lastShowArtistInfo {
+            lastShowArtistInfo = settings.ShowArtistInfo
+            ctl.refreshArtistInfo(ctl.info.TrackMetadata.Artist, true)
+        }
+        mprisSupport := settings.MprisSupport
+        ctl.run( func() { ctl.mprisServer.Listen(mprisSupport) })
+    })
 }
 
 func (ctl *Controller) DeviceSelect(index int) {
@@ -210,6 +223,178 @@ func (ctl *Controller) AboutPress() {
                  "\nURL: " + discovery.Url
     }
     logErr(ShowAboutDialog(ctl.view.GetWindow(), about))
+}
+
+// Reproduce una carpeta local: se escanea, se publica por HTTP en la red local
+// y se le pide al WiiM que reproduzca las URLs resultantes.
+func (ctl *Controller) FolderSelect(path string) {
+    discovery := ctl.device.GetDeviceDiscovery()
+    if discovery == nil {
+        noticeDialog(ctl.view.GetWindow(), "No device",
+            "Connect to a WiiM device before playing a local folder.")
+        return
+    }
+    ctl.config.Set("LocalFolder", path)
+    logErr(ctl.config.Save())
+
+    device := ctl.device
+    host := urlToHost(discovery.Url)
+    name := folderQueueName(path)
+    ctl.view.SetStatus("Scanning " + filepath.Base(path) + "...")
+    ctl.view.SetLocalFolder(path)
+    ctl.view.ShowLocal()
+
+    // El escaneo de etiquetas puede tardar en bibliotecas grandes: se hace
+    // fuera del hilo principal y sin bloquear los comandos al dispositivo.
+    go func() {
+        tracks, err := localmedia.Scan(path)
+        var items []localmedia.Item
+        if err == nil {
+            items, err = ctl.local.Publish(tracks, host)
+        }
+        if err != nil {
+            mainRun(func() { ctl.folderResult(path, false, err) })
+            return
+        }
+        log.Printf("Playing %d local tracks from %s", len(items), path)
+        entries := make([]LocalEntry, len(items))
+        for i, item := range items {
+            subtitle := item.Artist
+            if subtitle == "" {
+                subtitle = item.Album
+            }
+            entries[i] = LocalEntry{Title: item.Title, Subtitle: subtitle}
+        }
+        mainRun(func() {
+            ctl.localItems = items
+            ctl.localQueue = name
+            ctl.view.SetLocalTracks(entries)
+        })
+        media := make([]wiimdev.MediaItem, len(items))
+        for i, item := range items {
+            media[i] = wiimdev.MediaItem{
+                URL: item.URL, Title: item.Title, Artist: item.Artist,
+                Album: item.Album, AlbumArt: item.ArtURL, Mime: item.Mime,
+            }
+        }
+        var queued bool
+        ctl.runThen(func() {
+            queued, err = device.PlayMedia(name, media)
+            logErr(err)
+        }, func() {
+            ctl.folderResult(path, queued, err)
+        })
+    }()
+}
+
+// Busca en segundo plano los álbumes y canciones más populares del artista que
+// suena y los muestra bajo la fuente. Sin conexión o sin coincidencia fiable no
+// se muestra nada. Los resultados se guardan en memoria para no repetir consultas.
+func (ctl *Controller) refreshArtistInfo(artist string, force bool) {
+    artist = strings.TrimSpace(artist)
+    if artist == ctl.infoArtist && !force {
+        return
+    }
+    ctl.infoArtist = artist
+    ctl.view.SetArtistInfo("", nil, nil)
+    if artist == "" || !ctl.config.Get("ShowArtistInfo", true).(bool) {
+        return
+    }
+    if info, ok := ctl.artistCache[artist]; ok {
+        ctl.showArtistInfo(info)
+        return
+    }
+    go func() {
+        ctx, cancel := context.WithTimeout(context.Background(), 10 * time.Second)
+        defer cancel()
+        info, err := ctl.artistClient.Lookup(ctx, artist)
+        if err != nil {
+            log.Printf("Artist info for %q: %v", artist, err)
+            note := "Could not load artist info (no internet connection?)."
+            if errors.Is(err, artistinfo.ErrNotFound) {
+                note = "No popularity data found for \u201c" + artist + "\u201d on Deezer."
+            }
+            mainRun(func() {
+                if ctl.infoArtist == artist {
+                    ctl.view.SetArtistNote(note)
+                }
+            })
+            return
+        }
+        mainRun(func() {
+            if len(ctl.artistCache) >= 50 {
+                ctl.artistCache = map[string]*artistinfo.Info{}
+            }
+            ctl.artistCache[artist] = info
+            if ctl.infoArtist == artist {
+                ctl.showArtistInfo(info)
+            }
+        })
+    }()
+}
+
+func (ctl *Controller) showArtistInfo(info *artistinfo.Info) {
+    albums := make([]InfoRow, len(info.Albums))
+    for i, a := range info.Albums {
+        subtitle := ""
+        if a.Tracks > 0 {
+            subtitle = fmt.Sprintf("%d tracks", a.Tracks)
+        }
+        albums[i] = InfoRow{Title: a.Title, Subtitle: subtitle}
+    }
+    tracks := make([]InfoRow, len(info.Tracks))
+    for i, t := range info.Tracks {
+        tracks[i] = InfoRow{Title: t.Title, Subtitle: t.Album}
+    }
+    ctl.view.SetArtistInfo(info.Artist, albums, tracks)
+}
+
+// Reproduce la pista pulsada de la carpeta local (ya está en la cola del WiiM).
+func (ctl *Controller) LocalTrackSelect(index int) {
+    if ctl.localQueue == "" || index < 0 || index >= len(ctl.localItems) {
+        return
+    }
+    device := ctl.device
+    name := ctl.localQueue
+    ctl.run(func() {
+        logErr(device.PlayQueueTrack(name, index + 1))
+    })
+}
+
+// Índice en la carpeta local de la pista que suena, o -1 si no es local.
+func (ctl *Controller) localIndexOf(md *wiimdev.Metadata) int {
+    if md == nil || md.Title == "" {
+        return -1
+    }
+    for i, item := range ctl.localItems {
+        if item.Title == md.Title && item.Artist == md.Artist && item.Album == md.Album {
+            return i
+        }
+    }
+    return -1
+}
+
+func (ctl *Controller) folderResult(path string, queued bool, err error) {
+    md := ctl.info.TrackMetadata
+    ctl.view.SetPlaying(md.Title, md.Artist, md.Album)
+    if err != nil {
+        noticeDialog(ctl.view.GetWindow(), "Could not play folder",
+            fmt.Sprintf("%s\n\n%v\n\nRun wiimplay from a terminal to see the log.", path, err))
+    } else if !queued {
+        noticeDialog(ctl.view.GetWindow(), "Playing first track only",
+            "The WiiM did not accept the track queue, so only the first track "+
+            "of the folder is playing. Details are in the application log.")
+    }
+}
+
+// Nombre de la cola en el WiiM. Se quitan los guiones bajos porque la app los
+// usa como separador al mostrar los nombres de las playlists.
+func folderQueueName(path string) string {
+    name := strings.ReplaceAll(filepath.Base(path), "_", " ")
+    if name == "" || name == "." || name == "/" {
+        name = "Local folder"
+    }
+    return name
 }
 
 func (ctl *Controller) EqualizerSelect(name string) {
@@ -435,16 +620,15 @@ func (ctl *Controller) sendNotification(md *wiimdev.Metadata) {
         return
     }
     ctl.pixbufRequest(md.AlbumArt, TrackImageWidth,
-                      TrackImageHeight, func(pixbuf *gdk.Pixbuf) {
-        var tmpFile string
-        if pixbuf != nil {
-            tmpFile = os.TempDir() + "/wiiplay_notify_icon.png"
-            err := pixbuf.SavePNG(tmpFile, 5)
-            logErr(err)
-        }
+                      TrackImageHeight, func(pixbuf *gdkpixbuf.Pixbuf) {
         log.Printf("Sending notification")
-        sendNotification(ctl.application, md.Title,
-            md.Artist + "\n" + md.Album, tmpFile)
+        if pixbuf != nil {
+            sendNotification(ctl.application, md.Title,
+                md.Artist + "\n" + md.Album, pixbuf)
+        } else {
+            sendNotification(ctl.application, md.Title,
+                md.Artist + "\n" + md.Album, nil)
+        }
     })
 }
 
@@ -503,6 +687,9 @@ func (ctl *Controller) updateInfo() {
             defer ctl.emitStatusChanged()
         }
         if (newInfo.TransportState == wiimdev.StateNoMedia) {
+            ctl.view.SetSource("", "")
+            ctl.sourceKey = ""
+            ctl.refreshArtistInfo("", false)
             ctl.view.SetStatus("No media. Select a playlist.")
             ctl.view.SetAlbumArt(nil)
             ctl.view.ClearTracks();
@@ -512,11 +699,20 @@ func (ctl *Controller) updateInfo() {
             }
             return
         }
+        if name, desc := describeSource(newInfo.Source); name+"\x00"+desc != ctl.sourceKey {
+            ctl.sourceKey = name + "\x00" + desc
+            src := newInfo.Source
+            log.Printf("Source: %q (PlayMedium=%q TrackSource=%q PlayType=%q SpotifyActive=%v)",
+                name, src.PlayMedium, src.TrackSource, src.PlayType, src.SpotifyActive)
+            ctl.view.SetSource(name, desc)
+        }
         newMd := newInfo.TrackMetadata
         md := ctl.info.TrackMetadata
         metadataChanged := !metadataEqual(newMd, md)
         if metadataChanged {
             ctl.view.SetPlaying(newMd.Title, newMd.Artist, newMd.Album)
+            ctl.view.SetLocalTrack(ctl.localIndexOf(newMd))
+            ctl.refreshArtistInfo(newMd.Artist, false)
             if newMd.Title != "" {
                 ctl.sendNotification(newMd)
                 defer ctl.emitMetadataChanged()
@@ -556,7 +752,7 @@ func (ctl *Controller) updateInfo() {
         if newInfo.TrackMetadata.AlbumArt != ctl.info.TrackMetadata.AlbumArt {
             id := newMd.Id
             ctl.pixbufRequest(newInfo.TrackMetadata.AlbumArt, AlbumImageWidth,
-                              AlbumImageHeight, func(pixbuf *gdk.Pixbuf) {
+                              AlbumImageHeight, func(pixbuf *gdkpixbuf.Pixbuf) {
                 if id == ctl.info.TrackMetadata.Id {
                     ctl.view.SetAlbumArt(pixbuf)
                 }
@@ -628,7 +824,7 @@ func (ctl *Controller) updateTracks(playList string) {
             id := track.Id
             index := i
             ctl.pixbufRequest(track.Metadata.AlbumArt, TrackImageWidth,
-                              TrackImageHeight, func(pixbuf *gdk.Pixbuf) {
+                              TrackImageHeight, func(pixbuf *gdkpixbuf.Pixbuf) {
                 if pixbuf != nil {
                     if index < len(ctl.tracks) && id == ctl.tracks[index].Id {
                         logErr(ctl.view.SetTrackAlbumArt(index, pixbuf))
@@ -714,7 +910,7 @@ func (ctl *Controller) download(url string) ([]byte, error) {
 // Download the URL and generate a scaled pixbuf of the specified dimensions.
 // The callback for the pixbuf is executed on the main thread when complete.
 func (ctl *Controller) pixbufRequest(url string, width int, height int,
-                                     complete func(*gdk.Pixbuf)) {
+                                     complete func(*gdkpixbuf.Pixbuf)) {
     if !strings.HasPrefix(url, "http:") && !strings.HasPrefix(url, "https:") {
         mainRun( func() { complete(nil) })
         return
@@ -815,6 +1011,12 @@ func (ctl *Controller) discoverDevices() {
         }
         ctl.config.Set("Devices", ctl.devices)
         logErr(ctl.config.Save())
+        // GtkDropDown preselecciona el primer elemento y volver a elegirlo no
+        // emite señal, así que se conecta automáticamente al primer dispositivo.
+        if len(ctl.devices) > 0 {
+            ctl.view.SetDevice(0)
+            ctl.connectToDevice(0)
+        }
     })
 }
 
@@ -858,7 +1060,7 @@ func NewController(application *gtk.Application, config ConfigAdapter,
     ctl.mprisServer = mpris.NewMprisServer("wiimplay", ctl)
     ctl.mprisServer.Listen(ctl.config.Get("MprisSupport", true).(bool))
 
-    ctl.pixbufCache, err = lru.New[string, *gdk.Pixbuf](
+    ctl.pixbufCache, err = lru.New[string, *gdkpixbuf.Pixbuf](
         config.Get("PixbufCacheSize", 50).(int))
     if err != nil {
         return nil, err
@@ -870,7 +1072,11 @@ func NewController(application *gtk.Application, config ConfigAdapter,
     ctl.pixbufChan = make(chan PixbufRequest, 10)
     go ctl.pixbufLoop()
 
-    cacheDir := filepath.Join(glib.GetUserCacheDir(), "wiimplay")
+    userCache, err := os.UserCacheDir()
+    if err != nil {
+        return nil, err
+    }
+    cacheDir := filepath.Join(userCache, "wiimplay")
     err = os.MkdirAll(cacheDir, 0755)
     if err != nil {
         return nil, err
@@ -881,16 +1087,20 @@ func NewController(application *gtk.Application, config ConfigAdapter,
         return nil, err
     }
 
+    ctl.artistClient = artistinfo.NewClient()
+    ctl.artistCache = map[string]*artistinfo.Info{}
+    ctl.local = localmedia.NewServer(config.Get("LocalMediaPort", 8765).(int))
+
     ctl.view, err = NewView(application, ctl)
     if err != nil {
         return nil, err
     }
+    ctl.view.SetLastFolder(config.Get("LocalFolder", "").(string))
 
     if ctl.config.Get("HideOnStart", false).(bool) {
         ctl.view.Hide()
     }
-    ctl.view.HideOnDelete(ctl.config.Get("HideOnClose", true).(bool))
-    ctl.view.ShowStatusIcon(ctl.config.Get("ShowStatusIcon", true).(bool))
+    ctl.view.HideOnDelete(ctl.config.Get("HideOnClose", false).(bool))
 
     devices := config.Get("Devices", []interface{}{}).([]interface{})
     if len(devices) > 0 {
@@ -913,4 +1123,9 @@ func NewController(application *gtk.Application, config ConfigAdapter,
     }
 
     return ctl, nil
+}
+
+// Muestra la ventana (se llama al re-activar la aplicación).
+func (ctl *Controller) Show() {
+    ctl.view.Show()
 }

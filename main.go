@@ -6,11 +6,12 @@ import (
     "os"
     "path/filepath"
     "runtime"
+
     "github.com/shumatech/wiimplay/config"
     "github.com/shumatech/wiimplay/ui"
 
-    "github.com/gotk3/gotk3/glib"
-    "github.com/gotk3/gotk3/gtk"
+    "github.com/diamondburned/gotk4-adwaita/pkg/adw"
+    "github.com/diamondburned/gotk4/pkg/gio/v2"
 )
 
 var (
@@ -31,8 +32,10 @@ func main() {
 
     const appID = "com.shumatech.wiimplay"
 
-    configDir := filepath.Join(glib.GetUserConfigDir(), "wiimplay")
-    _, err := os.Stat(configDir)
+    userConfig, err := os.UserConfigDir()
+    fatalErr(err)
+    configDir := filepath.Join(userConfig, "wiimplay")
+    _, err = os.Stat(configDir)
     if errors.Is(err, os.ErrNotExist) {
         err = os.MkdirAll(configDir, 0755)
     }
@@ -41,11 +44,17 @@ func main() {
     config, err := config.NewConfig(configDir)
     fatalErr(err)
 
-    application, err := gtk.ApplicationNew(appID, glib.APPLICATION_FLAGS_NONE)
-    fatalErr(err)
+    application := adw.NewApplication(appID, gio.ApplicationFlagsNone)
 
-    application.Connect("activate", func() {
-        _, err = ui.NewController(application, config, Version, Build)
+    var controller *ui.Controller
+    application.ConnectActivate(func() {
+        // Si la ventana estaba oculta (Hide on close), volver a mostrarla
+        // en lugar de crear un segundo controlador.
+        if controller != nil {
+            controller.Show()
+            return
+        }
+        controller, err = ui.NewController(&application.Application, config, Version, Build)
         fatalErr(err)
     })
 

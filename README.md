@@ -1,62 +1,55 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-# WiiM Play - UPNP Control Point for WiiM Music Streamers
+# WiiM Play (GNOME / GTK4 fork)
 
-WiiM Play is a UPNP control point designed to manage the [WiiM music streamer products](https://www.wiimhome.com/) from Linkplay Technology Inc. Linkplay produces the WiiM Home app for controlling their devices but unfortunately it is not available for Linux. I created WiiM Play to enable me to view and control the music playback from these devices under Linux.
+A UPnP control point for [WiiM music streamers](https://www.wiimhome.com/)
+(Linkplay Technology Inc.) on Linux, with a GNOME-style interface.
+
+> **This is a modified fork of [WiiM Play by ShumaTech](https://github.com/shumatech/wiimplay).**
+> The original project, its design, and the device/UPnP code (`upnp/`, `wiimdev/`,
+> `mpris/`, `dcache/`, `config/`) are the work of its author; this fork builds on
+> it under the same license (GPL-3.0). This fork is not affiliated with or
+> endorsed by the original author, WiiM, or Linkplay.
+
+<!-- Add a screenshot of the new interface here, e.g. docs/screenshot.png -->
+
+## What this fork changes
+
+* **GTK4 + libadwaita interface** (via [gotk4](https://github.com/diamondburned/gotk4)) replacing the GTK3 UI: header bars, split view, adaptive light/dark theme, `AdwPreferencesDialog` for settings.
+* **Local folder playback** (`localmedia/`): pick a folder on this PC; the app scans it, serves it over HTTP on your LAN and asks the WiiM to play it as a queue.
+* **Source panel**: when the WiiM is not playing from a queue, shows the source (Spotify, SoundCloud, TIDAL, ...) reported by the device.
+* **Artist info** (`artistinfo/`): most popular albums and songs of the current artist, from Deezer's public API (optional, see below).
+* Desktop notifications through `GNotification`; each SOAP request uses its own HTTP connection, which avoids `EOF` errors seen when talking to a WiiM Mini.
+* Removed: the status tray icon (GTK4 has no `GtkStatusIcon`, and GNOME shows no tray by default).
 
 ## Features
 
-* Automatic discovery of WiiM devices on network
-* Graphical user interface - view and control all aspects of playback
-* Desktop notifications - displays album art and track metadata in most Linux desktop environments
-* Status tray icon - provides track metadata on hover and mouse controls
-* MPRIS support - allows using WiiM Play with other MPRIS-enabled software
-
-## User Interface
-
-![WiiM Play UI](docs/wiimplay_window.png)
-
-* GTK3-based
-* Player transport controls (play/pause, forward, backward, loop, shuffle)
-* Album art download
-* Seek/time bar
-* Stream quality display
-* Volume/mute control
-* Equalizer selection
-* Track metadata (title, artist, album)
-* Current play queue with album art thumbnails
-* Select presets created in the WiiM Home app
+* Automatic discovery of WiiM devices on the network
+* View and control playback: transport, seek, volume/mute, loop, shuffle, equalizer, device settings (output, balance, fade, fixed volume)
+* Track metadata, stream quality, album art, and the current play queue with thumbnails
 * Switch between multiple WiiM devices
-* Player settings (audio output port, balance, fade effects, fixed volume, etc.)
+* Desktop notifications with album art and track metadata
+* MPRIS support - works with media keys, `playerctl`, `osdlyrics`, etc.
 
-By default, the window is hidden when closed. There is a configuration setting to disable this and quit the application instead.
+By default the window quits when closed; enable **Hide on close** in Settings to keep it running in the background (use the MPRIS controls or launch the app again to bring the window back).
 
-## Notifications
+## Build and install
 
-WiiM Play uses GTK to show notifications including the album art and track metadata. How these notifications are displayed depends on your Linux desktop environment. Here is an example using the [dunst notification daemon](https://dunst-project.org/):
+Requires GTK 4 and libadwaita >= 1.5 (`AdwPreferencesDialog`, `AdwAboutDialog`) and Go.
 
-![WiiM Play Notify](docs/wiimplay_notify.png)
+    sudo apt install golang-go build-essential pkg-config libgtk-4-dev libadwaita-1-dev libgirepository1.0-dev
+    # libgirepository1.0-dev provides gobject-introspection-1.0.pc; the package name may differ on other distributions
+    go mod tidy
+    make
+    make install        # installs to ~/.local (binary + .desktop file)
 
-This feature may be disabled in the settings.
-
-## Status Icon
-
-WiiM Play uses GTK to show the status icon.  Under X11, GTK uses the [freedektop.org systemtray-spec](https://www.freedesktop.org/wiki/Specifications/systemtray-spec/). You can disable the status icon in the settings.
-
-The status icon supports the following mouse actions:
-
-* Hover to show the track metadata
-* Left click to show or hide the user interface window
-* Middle click to toggle play/pause
-* Right click to display a player control menu
-* Forward click to go to next track
-* Backward click to go to previous track
+The `.desktop` file is needed on GNOME for notifications and for the window to
+be associated with the application. Run with `WIIMPLAY_DEBUG=1 wiimplay` to log
+extra diagnostics and dump the XML exchanged with the device to `/tmp`.
 
 ## MPRIS
 
-WiiM Play supports MPRIS player controls and events. This allows using WiiM Play in tandem with other Linux software like [playerctl](https://github.com/altdesktop/playerctl), [mpris-ctl](https://git.sr.ht/~mariusor/mpris-ctl), [osdlyrics](https://github.com/osdlyrics/osdlyrics), etc.
-
-A common use case for MPRIS player controls is supporting media keys on keyboards.  For example, with the i3 window manager I bind my keyboard media keys with the following config:
+WiiM Play supports MPRIS player controls and events, so it works with other Linux software like [playerctl](https://github.com/altdesktop/playerctl), [mpris-ctl](https://git.sr.ht/~mariusor/mpris-ctl) or [osdlyrics](https://github.com/osdlyrics/osdlyrics). For example, with the i3 window manager, media keys can be bound with:
 
     bindsym XF86AudioPlay exec playerctl play-pause
     bindsym XF86AudioNext exec playerctl next
@@ -65,40 +58,54 @@ A common use case for MPRIS player controls is supporting media keys on keyboard
     bindsym Control+XF86AudioLowerVolume exec playerctl volume 0.05-
     bindsym Control+XF86AudioMute exec playerctl volume 0.0
 
-It is likely you can do something similar in your own Linux desktop environment.
-
-MPRIS player events are broadcasts to notify the system of a change in player state or metadata. You can use these events to show notifications, display on-screen lyrics, or trigger other actions.
-
 This feature may be disabled in the settings.
 
-## Installation
+## Play a local folder
 
-Download a release and copy the wiimplay executable to a location on your path. You will need GTK3 and its associated libraries installed.
+The top bar switches between **WiiM** (default) and **Local folder**. In the Local
+folder tab, **Choose folder…** (also in the menu as **Play local folder…**) picks a
+folder on this PC and lists its tracks; clicking a track plays it. The app
+scans it (FLAC, MP3, WAV, M4A, AAC, OGG/Opus, AIFF; tags and cover art are read
+when present), serves it over HTTP on your LAN and asks the WiiM to play it as a
+queue.
 
-## Build
+- The PC must stay on and the app running while the music plays.
+- The server listens only on the LAN address that reaches the WiiM, serves only
+  files of the chosen folder, and rejects non-local clients. The default port is
+  8765 (`LocalMediaPort` in the config file); if a firewall is active, allow it
+  (e.g. `sudo ufw allow from 192.168.0.0/16 to any port 8765 proto tcp`).
+- If the WiiM rejects the queue, only the first track is played and the reason
+  is written to the log.
 
-From the top level directory, either run make to create a stipped and compressed binary:
+## Source panel and artist info
 
-    $ make
+When the WiiM is not playing from a queue, the WiiM tab shows the source
+(Spotify, SoundCloud, TIDAL, ...) and, below it, the current artist's most
+popular albums and songs from [Deezer's public API](https://developers.deezer.com/api).
+"Popular" means streams on Deezer, not sales. Artists must match a Deezer artist
+by exact name, so uploader names on some services (e.g. SoundCloud) may find
+nothing. It can be turned off in Settings → Artist info; when enabled, the
+artist name is sent to `api.deezer.com`. Nothing is shown offline. Please
+follow Deezer's own terms of use for the API.
 
-Or use the go utility to create an uncompressed binary:
+## Credits
 
-    $ go build -tags=gtk_3_10 .
+* **WiiM Play** - original author and copyright holder: **ShumaTech**, © 2024 — <https://github.com/shumatech/wiimplay>
+* **GTK4/libadwaita port and the `localmedia`, `artistinfo` and source-panel additions** were developed with the assistance of **Claude**, an AI assistant by [Anthropic](https://www.anthropic.com/), used as a coding tool. As with any AI-assisted code, review and test it before relying on it.
+* [gotk4](https://github.com/diamondburned/gotk4) and [gotk4-adwaita](https://github.com/diamondburned/gotk4-adwaita) by diamondburned — GTK4/libadwaita bindings.
+* [dhowden/tag](https://github.com/dhowden/tag) by David Howden — audio tag reading.
+* Other dependencies from the original project are listed in `go.mod`.
+* Artist data: [Deezer](https://www.deezer.com/).
 
-## TODO
+## License
 
-### Browsing
+This fork is distributed under the **GNU General Public License v3.0**, the same
+license as the original project (see [LICENSE](LICENSE)). Original code:
+Copyright (C) 2024 ShumaTech. Modifications and additions: Copyright (C) 2026
+the contributors of this fork.
 
-I decided against supporting any type of music browsing or playlist creation in WiiM Play for now due to the effort required. You must create playlists using the WiiM Home app and save them as presets in order for WiiM Play to select them.
-
-### Groups
-
-I only own a single WiiM Pro device so this is not something very high on my priority list. I'm open to contributions though.
-
-### Porting
-
-The focus of WiiM Play is to run on Linux. GTK does run under Windows, MacOS, and other Unixes so it may be possible to port WiiM Play to these environments though other features like the status icon and MPRIS would need removing or porting per platform.
-
-### Themes
-
-Not everyone might like the black aesthetic so I might add a way to change the theme colors.
+gotk4 and gotk4-adwaita are licensed under the **GNU Affero General Public
+License v3.0**; dhowden/tag under a BSD-style license (see its repository). GPL-3.0
+and AGPL-3.0 are designed to be combined (section 13 of each license), but if
+you distribute binaries of this program, read the terms of both. This is not
+legal advice.

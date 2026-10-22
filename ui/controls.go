@@ -1,7 +1,8 @@
 package ui
 
 import (
-    "github.com/gotk3/gotk3/gtk"
+    "github.com/diamondburned/gotk4-adwaita/pkg/adw"
+    "github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
 type Controls struct {
@@ -22,135 +23,68 @@ type ControlsListener interface {
     FixedVolumeSelect(on bool)
 }
 
-func ShowControlsDialog(window gtk.IWindow, controls *Controls, listener ControlsListener) error {
-    flags := gtk.DIALOG_MODAL | gtk.DIALOG_DESTROY_WITH_PARENT
-    close := []interface{}{"Close", gtk.RESPONSE_CLOSE}
-    dialog, err := gtk.DialogNewWithButtons("Controls", window, flags, close)
-    if err != nil {
-        return err
+func newComboRow(title string, items []string, selected int,
+                 onSelect func(index int)) *adw.ComboRow {
+    row := adw.NewComboRow()
+    row.SetTitle(title)
+    row.SetModel(gtk.NewStringList(items))
+    if selected >= 0 && selected < len(items) {
+        row.SetSelected(uint(selected))
     }
-
-    box, err := dialog.GetContentArea()
-    if err != nil {
-        return err
-    }
-
-    grid, err := gtk.GridNew()
-    if err != nil {
-        return err
-    }
-    grid.SetRowSpacing(10)
-    grid.SetColumnSpacing(10)
-
-    label, err := gtk.LabelNew("Audio Output:")
-    if err != nil {
-        return err
-    }
-    label.SetHAlign(gtk.ALIGN_START)
-    grid.Attach(label, 0, 0, 1, 1)
-
-    combo, err := gtk.ComboBoxTextNew()
-    if err != nil {
-        return err
-    }
-    for _, entry := range controls.AudioOutputList {
-        combo.AppendText(entry)
-    }
-    combo.SetActive(controls.AudioOutput)
-    combo.Connect("changed", func(self *gtk.ComboBoxText) {
-        listener.AudioOutputSelect(self.GetActive())
+    // Se conecta después de fijar el valor inicial para no disparar el callback.
+    row.Connect("notify::selected", func() {
+        onSelect(int(row.Selected()))
     })
-    grid.Attach(combo, 1, 0, 1, 1)
+    return row
+}
 
-    label, err = gtk.LabelNew("Audio Input:")
-    if err != nil {
-        return err
-    }
-    label.SetHAlign(gtk.ALIGN_START)
-    grid.Attach(label, 0, 1, 1, 1)
-
-    combo, err = gtk.ComboBoxTextNew()
-    if err != nil {
-        return err
-    }
-    for _, entry := range controls.AudioInputList {
-        combo.AppendText(entry)
-    }
-    combo.SetActive(controls.AudioInput)
-    combo.Connect("changed", func(self *gtk.ComboBoxText) {
-        listener.AudioInputSelect(self.GetActive())
+func newSwitchRow(title string, active bool, onToggle func(on bool)) *adw.SwitchRow {
+    row := adw.NewSwitchRow()
+    row.SetTitle(title)
+    row.SetActive(active)
+    row.Connect("notify::active", func() {
+        onToggle(row.Active())
     })
-    grid.Attach(combo, 1, 1, 1, 1)
+    return row
+}
 
-    label, err = gtk.LabelNew("Volume Balance:")
-    if err != nil {
-        return err
-    }
-    label.SetHAlign(gtk.ALIGN_START)
-    grid.Attach(label, 0, 2, 1, 1)
+func ShowControlsDialog(parent gtk.Widgetter, controls *Controls,
+                        listener ControlsListener) {
+    dialog := adw.NewPreferencesDialog()
+    dialog.SetTitle("Device controls")
 
-    adjust, err := gtk.AdjustmentNew(0.0, -1.0, 1.0, 0.05, 0.1, 0.0)
-    if err != nil {
-        return nil
-    }
-    adjust.SetValue(controls.Balance)
-    adjust.Connect("value-changed", func(self *gtk.Adjustment) {
-        listener.BalanceSelect(self.GetValue())
-    })
+    page := adw.NewPreferencesPage()
 
-    scale, err := ScaleExtNew(gtk.ORIENTATION_HORIZONTAL, adjust)
-    if err != nil {
-        return nil
-    }
-    scale.SetDrawValue(true)
+    audio := adw.NewPreferencesGroup()
+    audio.SetTitle("Audio")
+    audio.Add(newComboRow("Audio output", controls.AudioOutputList,
+        controls.AudioOutput, listener.AudioOutputSelect))
+    audio.Add(newComboRow("Audio input", controls.AudioInputList,
+        controls.AudioInput, listener.AudioInputSelect))
+
+    adjust := gtk.NewAdjustment(controls.Balance, -1.0, 1.0, 0.05, 0.1, 0.0)
+    scale := gtk.NewScale(gtk.OrientationHorizontal, adjust)
+    scale.SetDrawValue(false)
     scale.SetHasOrigin(false)
-    grid.Attach(scale, 1, 2, 1, 1)
-
-    label, err = gtk.LabelNew("Fade Effects:")
-    if err != nil {
-        return err
-    }
-    label.SetHAlign(gtk.ALIGN_START)
-    grid.Attach(label, 0, 3, 1, 1)
-
-    sw, err := gtk.SwitchNew()
-    if err != nil {
-        return err
-    }
-    sw.SetActive(controls.FadeEffects)
-    sw.Connect("state-set", func(self *gtk.Switch) {
-        listener.FadeEffectsSelect(self.GetActive())
+    scale.SetSizeRequest(220, -1)
+    scale.SetVAlign(gtk.AlignCenter)
+    adjust.ConnectValueChanged(func() {
+        listener.BalanceSelect(adjust.Value())
     })
-    grid.Attach(sw, 1, 3, 1, 1)
+    balance := adw.NewActionRow()
+    balance.SetTitle("Volume balance")
+    balance.AddSuffix(scale)
+    audio.Add(balance)
+    page.Add(audio)
 
-    label, err = gtk.LabelNew("Fixed Volume:")
-    if err != nil {
-        return err
-    }
-    label.SetHAlign(gtk.ALIGN_START)
-    grid.Attach(label, 0, 4, 1, 1)
+    behavior := adw.NewPreferencesGroup()
+    behavior.SetTitle("Behavior")
+    behavior.Add(newSwitchRow("Fade effects", controls.FadeEffects,
+        listener.FadeEffectsSelect))
+    behavior.Add(newSwitchRow("Fixed volume", controls.FixedVolume,
+        listener.FixedVolumeSelect))
+    page.Add(behavior)
 
-    sw, err = gtk.SwitchNew()
-    if err != nil {
-        return err
-    }
-    sw.SetActive(controls.FixedVolume)
-    sw.Connect("state-set", func(self *gtk.Switch) {
-        listener.FixedVolumeSelect(self.GetActive())
-    })
-    grid.Attach(sw, 1, 4, 1, 1)
-
-    box.Add(grid)
-
-    box.SetSpacing(10)
-    box.SetMarginTop(10)
-    box.SetMarginBottom(10)
-    box.SetMarginLeft(10)
-    box.SetMarginRight(10)
-    box.ShowAll()
-
-    dialog.Run()
-    dialog.Destroy()
-
-    return nil
+    dialog.Add(page)
+    dialog.Present(parent)
 }

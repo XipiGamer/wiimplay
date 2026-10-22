@@ -18,6 +18,8 @@ type Device interface {
     GetTracks(id string) ([]Track, int, error)
     PlayTrack(track int) error
     SetPlayList(id string) error
+    PlayMedia(name string, items []MediaItem) (bool, error)
+    PlayQueueTrack(id string, index int) error
     GetDeviceDiscovery() *DeviceDiscovery
     SetEqualizer(setting string) error
     GetEqualizer() (string, error)
@@ -64,6 +66,16 @@ const (
     StateNoMedia
 )
 
+// Origen de la reproducción según el WiiM (GetInfoEx). Los valores son los que
+// informa el dispositivo, sin interpretar.
+type SourceInfo struct {
+    PlayMedium    string
+    TrackSource   string
+    PlayType      string
+    TrackURI      string
+    SpotifyActive bool
+}
+
 type DeviceInfo struct {
     TransportState TransportState
     Track int
@@ -73,6 +85,7 @@ type DeviceInfo struct {
     Mute bool
     LoopMode LoopMode
     TrackMetadata *Metadata
+    Source SourceInfo
 }
 
 type Metadata struct {

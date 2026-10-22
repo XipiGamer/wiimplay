@@ -1,17 +1,20 @@
 package ui
 
 import (
+    "errors"
     "log"
-    "fmt"
     "net/url"
     "strings"
 
     "github.com/shumatech/wiimplay/mpris"
     "github.com/shumatech/wiimplay/wiimdev"
 
-    "github.com/gotk3/gotk3/glib"
-    "github.com/gotk3/gotk3/gdk"
-    "github.com/gotk3/gotk3/gtk"
+    "github.com/diamondburned/gotk4-adwaita/pkg/adw"
+    "github.com/diamondburned/gotk4/pkg/gdk/v4"
+    "github.com/diamondburned/gotk4/pkg/gdkpixbuf/v2"
+    "github.com/diamondburned/gotk4/pkg/gio/v2"
+    "github.com/diamondburned/gotk4/pkg/glib/v2"
+    "github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
 func Sanitize(s string) string {
@@ -28,159 +31,94 @@ func Sanitize(s string) string {
     return s
 }
 
-type menuItem struct {
-    name string
-    action func()
-}
-
-func createMenu(items []menuItem) (*gtk.Menu, error) {
-    menu, err := gtk.MenuNew()
-    if err != nil {
-        return nil, err
-    }
-
-    for _, mi := range items {
-        item, err := gtk.MenuItemNewWithLabel(mi.name)
-        if err != nil {
-            return nil, err
-        }
-        item.Show()
-        if mi.action != nil {
-            action := mi.action
-            item.Connect("activate", func() {
-                action()
-            })
-        }
-        menu.Append(item)
-    }
-
-    return menu, nil
-}
-
-func createImageFromData(data []byte) (*gtk.Image, error) {
-    pixbuf, err := gdk.PixbufNewFromDataOnly(data)
-    if err != nil {
-        return nil, err
-    }
-    image, err := gtk.ImageNewFromPixbuf(pixbuf)
-    if err != nil {
-        return nil, err
-    }
-    return image, nil
-}
-
-func createImageButton(data []byte, pressed func()) (*gtk.EventBox, error) {
-    box, err := gtk.EventBoxNew()
-    if err != nil {
-        return nil, err
-    }
-    image, err := createImageFromData(data)
-    if err != nil {
-        return nil, err
-    }
-
-    styleContext, err := box.GetStyleContext()
-    if err != nil {
-        return nil, err
-    }
-    box.Connect("button-press-event", func() {
-        styleContext.AddClass("button-press");
-        pressed();
-    })
-    box.Connect("button-release-event", func() {
-        styleContext.RemoveClass("button-press");
-    })
-    box.Connect("enter-notify-event", func() {
-        styleContext.AddClass("button-hover");
-    })
-    box.Connect("leave-notify-event", func() {
-        styleContext.RemoveClass("button-hover");
-        styleContext.RemoveClass("button-press");
-    })
-
-    box.Add(image)
-    return box, nil
-}
-
-func createMultiImageButton(dataList [][]byte, pressed func()) (*gtk.EventBox, error) {
-    box, err := gtk.EventBoxNew()
-    if err != nil {
-        return nil, err
-    }
-    stack, err := gtk.StackNew()
-    if err != nil {
-        return nil,err
-    }
-    for _, data := range dataList {
-        image, err := createImageFromData(data)
-        if err != nil {
-            return nil, err
-        }
-        stack.Add(image)
-    }
-    styleContext, err := box.GetStyleContext()
-    if err != nil {
-        return nil, err
-    }
-    box.Connect("button-press-event", func() {
-        styleContext.AddClass("button-press");
-        pressed();
-    })
-    box.Connect("button-release-event", func() {
-        styleContext.RemoveClass("button-press");
-    })
-    box.Connect("enter-notify-event", func() {
-        styleContext.AddClass("button-hover");
-    })
-    box.Connect("leave-notify-event", func() {
-        styleContext.RemoveClass("button-hover");
-        styleContext.RemoveClass("button-press");
-    })
-
-    box.Add(stack)
-    return box, nil
-}
-
-func setMultiImageButton(button *gtk.EventBox, index int) {
-    child, err := button.GetChild()
-    if err != nil {
-        return
-    }
-    stack := child.(*gtk.Stack)
-    item := stack.GetChildren().Nth(uint(index)).Data()
-    stack.SetVisibleChild(item.(*gtk.Widget))
-}
-
-func newScaledPixbufFromData(data []byte, w int, h int) (*gdk.Pixbuf, error) {
-    pixbuf, err := gdk.PixbufNewFromDataOnly(data)
-    if err != nil {
-        fmt.Println(err)
-        return nil, err
-    }
-
-    if (pixbuf.GetWidth() != w || pixbuf.GetHeight() != h) {
-        var err error
-        pixbuf, err = pixbuf.ScaleSimple(w, h, gdk.INTERP_BILINEAR)
-        if err != nil {
-            return nil, err
-        }
-    }
-    return pixbuf, nil
-}
-
-func messageDialog(window *gtk.Window, message string) {
-    dialog := gtk.MessageDialogNew(window,
-        gtk.DIALOG_MODAL | gtk.DIALOG_DESTROY_WITH_PARENT,
-        gtk.MESSAGE_INFO, gtk.BUTTONS_CLOSE, "")
-    dialog.SetMarkup(message)
-    dialog.Run()
-    dialog.Destroy()
-}
-
 func logErr(err error) {
     if err != nil {
         log.Println(err)
     }
+}
+
+
+// Crea un Pixbuf a partir de bytes de imagen. Si w y h son > 0 la imagen se
+// escala al decodificarla (se puede llamar fuera del hilo principal).
+func pixbufFromData(data []byte, w int, h int) (*gdkpixbuf.Pixbuf, error) {
+    loader := gdkpixbuf.NewPixbufLoader()
+    if w > 0 && h > 0 {
+        loader.SetSize(w, h)
+    }
+    if err := loader.Write(data); err != nil {
+        loader.Close()
+        return nil, err
+    }
+    if err := loader.Close(); err != nil {
+        return nil, err
+    }
+    pixbuf := loader.Pixbuf()
+    if pixbuf == nil {
+        return nil, errors.New("could not decode image")
+    }
+    return pixbuf, nil
+}
+
+func newScaledPixbufFromData(data []byte, w int, h int) (*gdkpixbuf.Pixbuf, error) {
+    return pixbufFromData(data, w, h)
+}
+
+func textureFromData(data []byte) (*gdk.Texture, error) {
+    pixbuf, err := pixbufFromData(data, 0, 0)
+    if err != nil {
+        return nil, err
+    }
+    return gdk.NewTextureForPixbuf(pixbuf), nil
+}
+
+// Diálogo modal (AdwAlertDialog) con cabecera y texto.
+func noticeDialog(parent gtk.Widgetter, heading string, message string) {
+    dialog := adw.NewAlertDialog(heading, message)
+    dialog.AddResponse("close", "Close")
+    dialog.Present(parent)
+}
+
+func messageDialog(parent gtk.Widgetter, message string) {
+    noticeDialog(parent, "Error", message)
+}
+
+// Schedule a closure to execute on the main thread after a delay.
+func mainDelay(millis uint, fn func()) glib.SourceHandle {
+    return glib.TimeoutAdd(millis, func() bool {
+        fn()
+        return false
+    })
+}
+
+// Schedule a closure to run on the main thread (seguro desde cualquier hilo)
+func mainRun(fn func()) {
+    glib.IdleAdd(func() bool {
+        fn()
+        return false
+    })
+}
+
+// Schedule a closure to execute on the main thread and wait for its return.
+// Warning! Do not call from the main thread or it will hang.
+func mainAwait(fn func() interface{}) interface{} {
+    resultChan := make(chan interface{})
+    glib.IdleAdd(func() bool {
+        resultChan <- fn()
+        return false
+    })
+    return <-resultChan
+}
+
+// Notificación de escritorio vía GNotification. En GNOME requiere que exista
+// un .desktop con el mismo ID de aplicación (ver "make install").
+func sendNotification(application *gtk.Application, title string,
+                      body string, icon gio.Iconner) {
+    notification := gio.NewNotification(title)
+    notification.SetBody(body)
+    if icon != nil {
+        notification.SetIcon(icon)
+    }
+    application.SendNotification("notify", notification)
 }
 
 func loopModeToStatus(loopMode wiimdev.LoopMode) (loopStatus mpris.LoopStatus, shuffle bool) {
@@ -313,38 +251,6 @@ func urlToHost(urlStr string) string {
     return strings.Split(urlParsed.Host, ":")[0]
 }
 
-// Schedule a closure to execute on the main thread after a delay.
-func mainDelay(millis uint, fn func()) (glib.SourceHandle) {
-    return glib.TimeoutAdd(millis, func() bool {
-        fn()
-        return false
-    })
-}
-
-// Schedule a closure to run on the main thread
-func mainRun(fn func()) {
-    glib.IdleAddPriority(glib.PRIORITY_DEFAULT, fn)
-}
-
-// Schedule a closure to execute on the main thread and wait for its return.
-// Warning! Do not call from the main thread or it will hang.
-func mainAwait(fn func() interface{}) interface{} {
-    resultChan := make(chan interface{})
-    glib.IdleAddPriority(glib.PRIORITY_DEFAULT, func() {
-        resultChan <- fn()
-    })
-    return <- resultChan
-}
-
-func sendNotification(application *gtk.Application, title string,
-                      body string, icon string) {
-    notification := glib.NotificationNew(title)
-    notification.SetBody(body)
-    if icon != "" {
-        notification.SetIcon(icon)
-    }
-    application.SendNotification("notify", notification)
-}
 
 func metadataEqual(mdA *wiimdev.Metadata, mdB *wiimdev.Metadata) bool {
     return (mdA.Id == mdB.Id &&
@@ -375,4 +281,61 @@ func tracksEqual(trA []wiimdev.Track, trB []wiimdev.Track) bool {
         }
     }
     return true
+}
+
+
+// Servicios conocidos. Se busca el texto (sin distinguir mayúsculas) dentro de
+// lo que informa el dispositivo; si no coincide ninguno, se muestra tal cual.
+var knownSources = []struct{ match, name string }{
+    {"spotify", "Spotify"},
+    {"tidal", "TIDAL"},
+    {"soundcloud", "SoundCloud"},
+    {"qobuz", "Qobuz"},
+    {"deezer", "Deezer"},
+    {"amazon", "Amazon Music"},
+    {"youtube", "YouTube Music"},
+    {"airplay", "AirPlay"},
+    {"tunein", "TuneIn"},
+    {"iheart", "iHeartRadio"},
+    {"pandora", "Pandora"},
+    {"napster", "Napster"},
+    {"roon", "Roon"},
+    {"bluetooth", "Bluetooth"},
+    {"upnp", "UPnP / DLNA"},
+    {"dlna", "UPnP / DLNA"},
+}
+
+// En Spotify, TrackSource es una URI ("spotify:playlist:37i9..."): para
+// reconocer el servicio solo se usa lo que va antes de los dos puntos, así un
+// identificador aleatorio no puede coincidir con otro servicio.
+func sourceToken(s string) string {
+    s = strings.TrimSpace(s)
+    if i := strings.Index(s, ":"); i > 0 {
+        return s[:i]
+    }
+    return s
+}
+
+// Devuelve el nombre de la fuente de reproducción y una descripción, o
+// cadenas vacías si el dispositivo no informa ninguna. No se usa SpotifyActive:
+// el WiiM lo informa como verdadero también cuando suena otro servicio.
+func describeSource(src wiimdev.SourceInfo) (string, string) {
+    token := sourceToken(src.TrackSource)
+    candidates := []string{token, src.PlayMedium, urlToHost(src.TrackURI)}
+    for _, candidate := range candidates {
+        lower := strings.ToLower(candidate)
+        for _, known := range knownSources {
+            if strings.Contains(lower, known.match) {
+                return known.name, "Playing from " + known.name +
+                    ". No track list is available for this source."
+            }
+        }
+    }
+    for _, raw := range []string{token, src.PlayMedium} {
+        raw = strings.TrimSpace(raw)
+        if raw != "" && !strings.EqualFold(raw, "NONE") && !strings.EqualFold(raw, "UNKNOWN") {
+            return raw, "Playing from " + raw + ". No track list is available for this source."
+        }
+    }
+    return "", ""
 }

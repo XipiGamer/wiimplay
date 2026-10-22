@@ -35,7 +35,9 @@ By default the window quits when closed; enable **Hide on close** in Settings to
 
 ## Build and install
 
-Requires GTK 4 and libadwaita >= 1.5 (`AdwPreferencesDialog`, `AdwAboutDialog`) and Go.
+Requires Go >= 1.24, GTK 4 and libadwaita >= 1.5 (`AdwPreferencesDialog`, `AdwAboutDialog`). Optional: `playerctl`, to control playback from media keys (see MPRIS).
+
+On Debian/Ubuntu:
 
     sudo apt install golang-go build-essential pkg-config libgtk-4-dev libadwaita-1-dev libgirepository1.0-dev
     # libgirepository1.0-dev provides gobject-introspection-1.0.pc; the package name may differ on other distributions

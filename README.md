@@ -11,7 +11,12 @@ A UPnP control point for [WiiM music streamers](https://www.wiimhome.com/)
 > it under the same license (GPL-3.0). This fork is not affiliated with or
 > endorsed by the original author, WiiM, or Linkplay.
 
-<!-- Add a screenshot of the new interface here, e.g. docs/screenshot.png -->
+![WiiM tab: source and artist info](docs/screenshot-wiim.png)
+![Local folder tab](docs/screenshot-local.png)
+
+_Original GTK3 interface (upstream), for comparison:_
+
+![Original interface](docs/wiimplay_window.png)
 
 ## What this fork changes
 
